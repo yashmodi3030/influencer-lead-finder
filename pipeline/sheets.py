@@ -12,7 +12,7 @@ from datetime import date, datetime
 from typing import Iterable
 
 from . import config
-from .models import Lead, QueryLogEntry, Rejection, RunStats
+from .models import Lead, QueryLogEntry, Rejection, RunStats, SearchRequest
 
 log = logging.getLogger(__name__)
 
@@ -20,14 +20,20 @@ TAB_HEADERS: dict[str, list[str]] = {
     "Leads": [
         "channel_id", "handle", "channel_url", "name", "subscribers", "total_views",
         "video_count", "median_views", "avg_views", "engagement_rate", "last_upload",
-        "country", "niche", "description", "website", "email", "email_status", "phone",
-        "contact_source", "source_url", "date_found", "status", "notes",
+        "country", "niche", "description", "website", "instagram", "instagram_url",
+        "instagram_followers", "email", "email_status", "phone", "contact_source", "source_url",
+        "search_query", "date_found", "status", "notes",
+    ],
+    # Type a query in column A (status blank or "pending"); the next run searches it.
+    "Searches": [
+        "query", "niche", "status", "requested_at", "processed_at", "channels_found",
+        "leads_added", "note",
     ],
     "Settings": ["key", "value"],
     "Rejected": ["channel_id", "name", "reason", "date"],
     "QueryLog": ["query", "api", "date", "results_count"],
     "RunLog": [
-        "run_id", "started_at", "finished_at", "youtube_units_used", "found",
+        "run_id", "started_at", "finished_at", "youtube_units_used", "web_searches_used", "found",
         "checked", "accepted", "rejected", "errors", "warnings",
     ],
 }
@@ -67,6 +73,15 @@ def _open_spreadsheet(service_account_json: str, sheet_id: str):
         raise SheetsUnavailable(f"Google Sheets API error: {exc}") from exc
     except Exception as exc:  # auth / network errors from google-auth or requests
         raise SheetsUnavailable(f"Could not open the spreadsheet: {type(exc).__name__}: {exc}") from exc
+
+
+def _column_letter(n: int) -> str:
+    """1 -> A, 26 -> Z, 27 -> AA."""
+    letters = ""
+    while n:
+        n, rem = divmod(n - 1, 26)
+        letters = chr(65 + rem) + letters
+    return letters
 
 
 def _parse_date(value: str) -> date | None:
@@ -122,6 +137,19 @@ class SheetStore:
                     if not dry_run:
                         ws.update(values=[headers], range_name="A1")
                     current = list(headers)
+                else:
+                    # Columns added in newer versions go after the owner's existing columns.
+                    have = {h.lower() for h in current}
+                    missing = [h for h in headers if h.lower() not in have]
+                    if missing:
+                        actions.append(f"add columns {', '.join(missing)} to {title}")
+                        if not dry_run:
+                            needed = len(current) + len(missing)
+                            col_count = getattr(ws, "col_count", needed)
+                            if col_count < needed:
+                                ws.add_cols(needed - col_count)
+                            ws.update(values=[missing], range_name=f"{_column_letter(len(current) + 1)}1")
+                        current = current + missing
                 self._headers[title] = current
             self._worksheets[title] = ws
 
@@ -195,6 +223,17 @@ class SheetStore:
             if (r.get("channel_id") or "").strip()
         }
 
+    def read_pending_searches(self) -> list[SearchRequest]:
+        """Rows of the Searches tab whose status is blank or "pending"."""
+        pending = []
+        for i, record in enumerate(self._records("Searches"), start=2):  # row 1 = headers
+            query = (record.get("query") or "").strip()
+            status = (record.get("status") or "").strip().lower()
+            if query and status in ("", "pending"):
+                pending.append(SearchRequest(query=query, niche=(record.get("niche") or "").strip(), row=i,
+                                             requested_at=(record.get("requested_at") or "").strip()))
+        return pending
+
     def read_query_log(self) -> dict[str, date]:
         """Lower-cased query -> most recent date it ran."""
         last: dict[str, date] = {}
@@ -232,6 +271,23 @@ class SheetStore:
         rows = [e.to_row(headers) for e in entries]
         self._append("QueryLog", rows)
         return len(rows)
+
+    def save_searches(self, searches: Iterable[SearchRequest]) -> None:
+        """Update processed rows in place (one batched call) and append new ones (row == 0)."""
+        searches = list(searches)
+        if not searches:
+            return
+        ws = self._worksheets.get("Searches")
+        if ws is None:
+            raise SheetsUnavailable("Tab Searches is not available")
+        headers = self.headers("Searches")
+        last_col = _column_letter(len(headers))
+        updates = [{"range": f"A{s.row}:{last_col}{s.row}", "values": [s.to_row(headers)]}
+                   for s in searches if s.row]
+        if updates:
+            ws.batch_update(updates, value_input_option="RAW")
+        new_rows = [s.to_row(headers) for s in searches if not s.row]
+        self._append("Searches", new_rows)
 
     def append_run_log(self, stats: RunStats) -> None:
         self._append("RunLog", [stats.to_row(self.headers("RunLog"))])

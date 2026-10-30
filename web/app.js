@@ -27,6 +27,7 @@
     ["niche", "Niche", true],
     ["email", "Email", true],
     ["phone", "Phone", true],
+    ["instagram", "Instagram", true],
     ["website", "Website", false],
     ["date_found", "Found", true],
     ["status", "Status", true],
@@ -34,8 +35,8 @@
   ];
   var EXPORT_FIELDS = ["channel_id", "handle", "channel_url", "name", "subscribers", "total_views",
     "video_count", "median_views", "avg_views", "engagement_rate", "last_upload", "country",
-    "niche", "description", "website", "email", "email_status", "phone", "contact_source",
-    "source_url", "date_found", "status", "notes"];
+    "niche", "description", "website", "instagram", "instagram_url", "instagram_followers", "email", "email_status", "phone", "contact_source",
+    "source_url", "search_query", "date_found", "status", "notes"];
 
   var state = {
     leads: [],
@@ -44,6 +45,10 @@
     sortDir: "desc",
     page: 1,
     idleTimer: null,
+    // From the decrypted data; kept in memory only.
+    repo: "",
+    sheetUrl: "",
+    dispatchToken: "",
   };
 
   function $(id) { return document.getElementById(id); }
@@ -184,6 +189,10 @@
 
   function signOut(message) {
     clearTimeout(state.idleTimer);
+    state.repo = state.sheetUrl = state.dispatchToken = "";
+    $("ns-list").replaceChildren();
+    $("ns-message").replaceChildren();
+    $("ns-query").value = "";
     state.leads = [];
     state.filtered = [];
     state.page = 1;
@@ -230,6 +239,10 @@
     var generated = payload.generated_at ? new Date(payload.generated_at) : null;
     $("data-age").textContent = generated && !isNaN(generated) ? "Data as of " + generated.toLocaleString() : "";
     renderStats(payload.last_run);
+    state.repo = /^[\w.-]+\/[\w.-]+$/.test(payload.repo || "") ? payload.repo : "";
+    state.sheetUrl = safeHttpUrl(payload.sheet_url) || "";
+    state.dispatchToken = String(payload.dispatch_token || "");
+    renderSearches(payload.searches || []);
     populateFilters();
     buildHeader();
     $("login-view").hidden = true;
@@ -286,6 +299,7 @@
       fmax: $("f-fmax").value === "" ? null : Number($("f-fmax").value),
       hasEmail: $("f-email").checked,
       hasPhone: $("f-phone").checked,
+      hasIg: $("f-ig").checked,
     };
   }
 
@@ -298,8 +312,9 @@
       if (f.fmax !== null && l._subs > f.fmax) return false;
       if (f.hasEmail && !l.email) return false;
       if (f.hasPhone && !l.phone) return false;
+      if (f.hasIg && !l.instagram) return false;
       if (f.q) {
-        var hay = [l.handle, l.name, l.description, l.email, l.niche, l.country, l.notes, l.website].join(" ").toLowerCase();
+        var hay = [l.handle, l.name, l.description, l.email, l.niche, l.country, l.notes, l.website, l.instagram, l.search_query].join(" ").toLowerCase();
         if (hay.indexOf(f.q) === -1) return false;
       }
       return true;
@@ -415,6 +430,16 @@
     }
     tr.appendChild(phoneCell);
 
+    var igCell = el("td", { className: "nowrap" });
+    var igHref = safeHttpUrl(lead.instagram_url);
+    if (lead.instagram) {
+      igCell.appendChild(link(igHref, "@" + lead.instagram, true));
+      if (lead.instagram_followers) {
+        igCell.appendChild(el("span", { className: "sub", text: toNumber(lead.instagram_followers).toLocaleString() + " followers" }));
+      }
+    }
+    tr.appendChild(igCell);
+
     var siteCell = el("td");
     var siteHref = safeHttpUrl(lead.website);
     if (siteHref) {
@@ -428,6 +453,82 @@
     tr.appendChild(el("td", null, [el("span", { className: "pill " + statusClass, text: lead.status.replace(/_/g, " ") })]));
     tr.appendChild(el("td", { className: "notes", text: lead.notes }));
     return tr;
+  }
+
+  // ---------------------------------------------------------------- new search
+
+  function renderSearches(searches) {
+    var list = $("ns-list");
+    list.replaceChildren();
+    searches.slice(0, 10).forEach(function (s) {
+      var status = String(s.status || "pending").toLowerCase();
+      var detail = status === "done"
+        ? (s.leads_added || 0) + " new leads from " + (s.channels_found || 0) + " channels"
+        : (status === "error" ? (s.note || "failed") : "waiting for the next run");
+      list.appendChild(el("li", null, [
+        el("span", { className: "q", text: s.query }),
+        el("span", { className: "pill status-" + status.replace(/[^a-z_]/g, ""), text: status }),
+        el("span", { className: "muted", text: detail }),
+        s.processed_at ? el("span", { className: "muted", text: String(s.processed_at).slice(0, 16).replace("T", " ") }) : null,
+      ]));
+    });
+    $("ns-recent").hidden = !list.children.length;
+  }
+
+  function nsMessage(parts) {
+    var box = $("ns-message");
+    box.replaceChildren();
+    parts.forEach(function (p) {
+      box.appendChild(typeof p === "string" ? document.createTextNode(p) : p);
+    });
+  }
+
+  function startSearch(evt) {
+    evt.preventDefault();
+    var query = $("ns-query").value.replace(/\s+/g, " ").trim();
+    if (query.length < 2) { nsMessage(["Type what kind of creators to look for."]); return; }
+    var actionsUrl = state.repo ? "https://github.com/" + state.repo + "/actions/workflows/pipeline.yml" : "";
+
+    if (state.dispatchToken && state.repo) {
+      $("ns-btn").disabled = true;
+      nsMessage(["Starting search…"]);
+      fetch("https://api.github.com/repos/" + state.repo + "/actions/workflows/pipeline.yml/dispatches", {
+        method: "POST",
+        headers: {
+          "Accept": "application/vnd.github+json",
+          "Authorization": "Bearer " + state.dispatchToken,
+          "Content-Type": "application/json",
+          "X-GitHub-Api-Version": "2022-11-28",
+        },
+        body: JSON.stringify({ ref: "main", inputs: { query: query } }),
+        cache: "no-store",
+        referrerPolicy: "no-referrer",
+      }).then(function (resp) {
+        if (resp.status === 204) {
+          nsMessage(["Search for \u201c" + query + "\u201d started. New creators appear here in about 3\u20135 minutes \u2014 then reload the page and sign in again. ",
+            actionsUrl ? link(actionsUrl, "Watch progress", true) : ""]);
+          $("ns-query").value = "";
+          toast("Search started", "ok");
+        } else {
+          nsMessage(["GitHub refused the request (HTTP " + resp.status + "). The search token may have expired; see SETUP.md. You can still ",
+            actionsUrl ? link(actionsUrl, "run it on GitHub", true) : "run it on GitHub", "."]);
+        }
+      }).catch(function () {
+        nsMessage(["Could not reach GitHub. Check your connection and try again."]);
+      }).then(function () { $("ns-btn").disabled = false; });
+      return;
+    }
+
+    // No token configured: hand the query over to the Sheet or the GitHub "Run workflow" form.
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(query).catch(function () {});
+    }
+    var parts = ["Copied \u201c" + query + "\u201d. To run it, either "];
+    if (state.sheetUrl) parts.push(link(state.sheetUrl, "add it to the Searches tab of your Sheet", true), " (picked up within 30 minutes)");
+    if (state.sheetUrl && actionsUrl) parts.push(", or ");
+    if (actionsUrl) parts.push(link(actionsUrl, "run it now on GitHub", true), " (Run workflow \u2192 paste into \u201cSearch for\u201d)");
+    parts.push(".");
+    nsMessage(parts);
   }
 
   // ---------------------------------------------------------------- export
@@ -468,6 +569,7 @@
     initTheme();
 
     $("login-form").addEventListener("submit", onSubmit);
+    $("ns-form").addEventListener("submit", startSearch);
     $("signout-btn").addEventListener("click", function () { signOut(); });
     $("export-btn").addEventListener("click", exportCsv);
     $("prev-btn").addEventListener("click", function () { state.page -= 1; renderTable(); });
@@ -476,10 +578,11 @@
       ["f-search", "f-niche", "f-status", "f-fmin", "f-fmax"].forEach(function (id) { $(id).value = ""; });
       $("f-email").checked = false;
       $("f-phone").checked = false;
+      $("f-ig").checked = false;
       applyFilters();
     });
     $("f-search").addEventListener("input", debounce(function () { applyFilters(); }, 150));
-    ["f-niche", "f-status", "f-email", "f-phone"].forEach(function (id) {
+    ["f-niche", "f-status", "f-email", "f-phone", "f-ig"].forEach(function (id) {
       $(id).addEventListener("change", function () { applyFilters(); });
     });
     ["f-fmin", "f-fmax"].forEach(function (id) {

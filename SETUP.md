@@ -7,6 +7,8 @@ Budget about 30 minutes. The pipeline uses these secrets:
 | `GOOGLE_SERVICE_ACCOUNT_JSON` | Step 2 – service-account key file contents |
 | `SHEET_ID` | Step 2 – from the Sheet URL |
 | `YOUTUBE_API_KEY` | Step 4 – recommended (without it the service account is tried) |
+| `TAVILY_API_KEY` / `SERPAPI_KEY` | Step 4 – optional, for finding Instagram profiles |
+| `DISPATCH_TOKEN` | Step 5 – optional, lets the dashboard start searches directly |
 | `DASHBOARD_USERNAME` | Step 3 – already set for you |
 | `DASHBOARD_PASSWORD` | Step 3 – already set for you |
 
@@ -44,7 +46,7 @@ Keep them in a password manager while you work. Never paste them into
 8. Copy the **SHEET_ID** from the address bar:
    `https://docs.google.com/spreadsheets/d/`**`1AbC...xyz`**`/edit` – the part between `/d/` and `/edit`.
 9. You don't need to create any tabs: the first pipeline run creates `Leads`, `Settings`,
-   `Rejected`, `QueryLog` and `RunLog` with headers, and seeds Settings.
+   `Searches`, `Rejected`, `QueryLog` and `RunLog` with headers, and seeds Settings.
 
 **Turning the key file into the secret:** `GOOGLE_SERVICE_ACCOUNT_JSON` is the *entire
 contents* of the JSON file. Open it in Notepad, **Ctrl+A**, **Ctrl+C**. For GitHub you can
@@ -90,6 +92,17 @@ If `YOUTUBE_API_KEY` is not set, the pipeline tries the service account from ste
 (the API must still be enabled, step 4.1). If the RunLog then says YouTube refused the
 credentials, create the API key.
 
+**Web search for Instagram (optional)**
+
+5. <https://app.tavily.com/> → sign up → copy the API key (`tvly-…`) → **TAVILY_API_KEY**
+   (free: ~1,000 searches/month).
+6. Optional fallback: <https://serpapi.com/manage-api-key> → **SERPAPI_KEY** (free: ~250/month).
+
+These are used only to find a creator's Instagram profile when their YouTube descriptions don't
+link it, and to read the public bio from the search result. At most
+`instagram_lookups_per_run` (default 15) searches per run, and only for leads still missing an
+email or phone. Without the keys, Instagram handles still come from the creators' own text.
+
 ## 5. GitHub repository, secrets and Pages
 
 The repository is already created for you as **private**. Choose how to host the website:
@@ -106,8 +119,23 @@ Note: private repos get 2,000 free Actions minutes/month; one daily run uses ~2�
 
 1. Repo → **Settings** → **Secrets and variables** → **Actions** → **Secrets** tab → **New repository secret**.
 2. Already added for you: `GOOGLE_SERVICE_ACCOUNT_JSON`, `SHEET_ID`, `DASHBOARD_USERNAME`,
-   `DASHBOARD_PASSWORD`. Add **`YOUTUBE_API_KEY`** (step 4) the same way. To replace one,
+   `DASHBOARD_PASSWORD`, `YOUTUBE_API_KEY`, `TAVILY_API_KEY`, `SERPAPI_KEY`. To replace one,
    click it → **Update secret** (names must match exactly).
+
+**Optional: start searches straight from the dashboard (`DISPATCH_TOKEN`)**
+
+Without this, the dashboard's *New search* box copies your query and links you to the
+Searches tab or the Run workflow page. With it, the search starts with one click.
+
+1. <https://github.com/settings/personal-access-tokens/new> (fine-grained token).
+2. Name `lead-finder-search`, expiration e.g. 1 year, **Repository access** → *Only select
+   repositories* → this repo.
+3. **Permissions** → Repository permissions → **Actions: Read and write**. Nothing else.
+4. **Generate token**, copy it, add it as the secret **`DISPATCH_TOKEN`**, then run
+   **Actions → Deploy website to GitHub Pages → Run workflow**.
+
+The token is stored only inside the encrypted data file, so only people who know the dashboard
+password can use it, and it can do nothing except start this repository's workflows.
 
 **Enable Pages (options A/B)**
 
@@ -150,5 +178,8 @@ you first; click **Enable workflow** on the Actions tab to resume.
 | Few leads, many *"median views … <"* / *"subscribers … <"* rejections | Thresholds too strict for the niche | Lower `min_median_views` / `min_subscribers` in Settings. |
 | Leads without email | Creator only shows it behind YouTube's "View email address" button | Expected: that button needs a CAPTCHA and is not automated. Use the channel link to look manually. |
 | RunLog: *"no fresh queries"* | All query variants used in last 7 days | Add more niches in Settings. |
+| Searches tab row stays empty | The 30-minute check hasn't run yet, or `status` isn't blank/`pending` | Wait up to 30 min, or run the workflow manually. GitHub may delay scheduled runs at busy times. |
+| Dashboard: *"GitHub refused the request (HTTP 401/403/404)"* | `DISPATCH_TOKEN` expired, wrong repo, or missing *Actions: write* | Create a new token (step 5), update the secret, redeploy. |
+| Lead has an Instagram handle but no followers/bio | The profile wasn't in the search results, or the lookup budget was used up | Raise `instagram_lookups_per_run`, or check the profile link manually. |
 | Pages workflow skipped | `PAGES_ENABLED` variable missing | Step 5.4. |
 | Pages deploy fails *"Get Pages site failed"* | Pages not enabled, or private repo on free plan | Step 5 options A/B/C. |

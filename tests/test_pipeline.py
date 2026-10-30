@@ -292,3 +292,92 @@ def test_main_without_credentials_exits_1(monkeypatch, capsys):
     assert main(["--dry-run"]) == 1
     out = capsys.readouterr().out
     assert "GOOGLE_SERVICE_ACCOUNT_JSON and SHEET_ID are required" in out
+
+
+# -- user-typed searches and Instagram ----------------------------------------
+
+def searches_tab(*rows):
+    return FakeWorksheet("Searches", [TAB_HEADERS["Searches"], *rows])
+
+
+def test_searches_tab_rows_run_first_and_are_marked_done():
+    book = make_book()
+    book.tabs["Searches"] = searches_tab(["old query", "", "done", "", "", "", "", ""],
+                                         ["home workout for women", "fitness", "", "", "", "", "", ""])
+    yt = FakeYouTube(hits("UCgood"), [channel("UCgood", description="Business: good@gmail.com")],
+                     {"UUgood": good_videos()})
+    p, code = run_pipeline(book, yt, max_queries=1)
+    assert code == 0
+    assert yt.queries[0][0] == "home workout for women" and len(yt.queries) == 2  # + 1 rotation query
+    row = dict(zip(TAB_HEADERS["Searches"], book.tabs["Searches"].rows[2]))
+    assert row["status"] == "done" and row["channels_found"] == 1 and row["leads_added"] == 1
+    assert book.tabs["Searches"].rows[1][2] == "done"  # untouched
+    lead = dict(zip(TAB_HEADERS["Leads"], book.tabs["Leads"].append_calls[0][0][0]))
+    assert lead["search_query"] == "home workout for women" and lead["niche"] == "fitness"
+
+
+def test_cli_query_skips_rotation_and_is_recorded():
+    book = make_book()
+    yt = FakeYouTube(hits("UCgood"), [channel("UCgood")], {"UUgood": good_videos()})
+    p, code = run_pipeline(book, yt, queries=["  calisthenics  "])
+    assert code == 0 and [q[0] for q in yt.queries] == ["calisthenics"]
+    saved = dict(zip(TAB_HEADERS["Searches"], book.tabs["Searches"].append_calls[0][0][0]))
+    assert saved["query"] == "calisthenics" and saved["status"] == "done" and saved["leads_added"] == 1
+
+
+def test_searches_only_without_pending_does_nothing():
+    book = make_book()
+    yt = FakeYouTube(hits("UCgood"), [channel("UCgood")], {"UUgood": good_videos()})
+    p, code = run_pipeline(book, yt, searches_only=True)
+    assert code == 0 and yt.queries == [] and not p.changed
+    assert not book.tabs["RunLog"].append_calls  # no noise rows every 30 minutes
+
+
+def test_search_error_is_marked():
+    class FailingYouTube(FakeYouTube):
+        def search_videos(self, query, published_after):
+            raise QuotaExceeded("quota used up")
+
+    book = make_book()
+    book.tabs["Searches"] = searches_tab(["yoga for kids", "", "pending", "", "", "", "", ""])
+    p, code = run_pipeline(book, FailingYouTube([], [], {}), searches_only=True)
+    row = dict(zip(TAB_HEADERS["Searches"], book.tabs["Searches"].rows[1]))
+    assert code == 0 and row["status"] == "error" and "quota used up" in row["note"]
+
+
+class FakeWeb:
+    def __init__(self, routes):
+        self.routes, self.queries = routes, []
+
+    def search(self, query):
+        self.queries.append(query)
+        return self.routes.get(query, []), "tavily"
+
+
+def test_instagram_bio_fills_missing_contacts():
+    from pipeline.search import SearchResult
+
+    web = FakeWeb({'site:instagram.com "riya.lifts"': [SearchResult(
+        "https://www.instagram.com/riya.lifts/", "Riya (@riya.lifts) • Instagram photos and videos",
+        "45K followers · Coach · collabs: riya.collabs@gmail.com · 98765 43210", "tavily")]})
+    book = make_book()
+    yt = FakeYouTube(hits("UCgood"), [channel("UCgood", description="New videos weekly. Instagram: @riya.lifts")],
+                     {"UUgood": good_videos()})
+    p, code = run_pipeline(book, yt, max_queries=1, web_search=web)
+    lead = dict(zip(TAB_HEADERS["Leads"], book.tabs["Leads"].append_calls[0][0][0]))
+    assert lead["instagram"] == "riya.lifts" and lead["instagram_followers"] == 45000
+    assert lead["email"] == "riya.collabs@gmail.com" and lead["phone"] == "+919876543210"
+    assert lead["contact_source"] == "instagram bio (search snippet)"
+    assert lead["source_url"] == "https://www.instagram.com/riya.lifts/"
+    run = dict(zip(TAB_HEADERS["RunLog"], book.tabs["RunLog"].append_calls[0][0][0]))
+    assert run["web_searches_used"] == 1
+
+
+def test_github_output(tmp_path, monkeypatch):
+    from pipeline.main import write_github_output
+
+    out = tmp_path / "out.txt"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(out))
+    write_github_output(True)
+    write_github_output(False)
+    assert out.read_text() == "changed=true\nchanged=false\n"

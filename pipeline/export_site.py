@@ -69,14 +69,28 @@ def decrypt_payload(blob: dict, username: str, password: str) -> dict:
     return json.loads(plaintext)
 
 
-def build_payload(store: SheetStore, now: datetime | None = None) -> dict:
+RECENT_SEARCHES = 20
+
+
+def build_payload(store: SheetStore, now: datetime | None = None, sheet_id: str = "",
+                  repo: str = "", dispatch_token: str = "") -> dict:
+    """Everything the dashboard shows. It is encrypted before it is published.
+
+    ``dispatch_token`` (optional) lets the dashboard start a search via the GitHub API;
+    it should be a fine-grained token limited to Actions on this one repository.
+    """
     store.attach()
     leads = [r for r in store.read_table("Leads") if (r.get("channel_id") or "").strip()]
     runs = store.read_table("RunLog")
+    searches = [r for r in store.read_table("Searches") if (r.get("query") or "").strip()]
     return {
         "generated_at": (now or datetime.now(timezone.utc)).replace(microsecond=0).isoformat(),
         "leads": leads,
         "last_run": runs[-1] if runs else None,
+        "searches": searches[-RECENT_SEARCHES:][::-1],
+        "sheet_url": f"https://docs.google.com/spreadsheets/d/{sheet_id}/edit" if sheet_id else "",
+        "repo": repo,
+        "dispatch_token": dispatch_token,
     }
 
 
@@ -103,7 +117,9 @@ def main(argv=None) -> int:
         log.error("GOOGLE_SERVICE_ACCOUNT_JSON and SHEET_ID are required to read the leads.")
         return 1
     try:
-        payload = build_payload(SheetStore.connect(cfg.google_service_account_json, cfg.sheet_id))
+        payload = build_payload(SheetStore.connect(cfg.google_service_account_json, cfg.sheet_id),
+                                sheet_id=cfg.sheet_id, repo=(os.environ.get("GITHUB_REPOSITORY") or "").strip(),
+                                dispatch_token=(os.environ.get("DISPATCH_TOKEN") or "").strip())
     except SheetsUnavailable as exc:
         log.error("Google Sheets unreachable: %s", exc)
         return 1

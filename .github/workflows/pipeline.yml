@@ -2,9 +2,14 @@ name: Daily lead pipeline
 
 on:
   schedule:
-    - cron: "0 4 * * *" # 04:00 UTC = 09:30 IST
+    - cron: "0 4 * * *" # 04:00 UTC = 09:30 IST: full daily run
+    - cron: "*/30 * * * *" # every 30 min: only searches typed into the Searches tab
   workflow_dispatch:
     inputs:
+      query:
+        description: "Search for (e.g. 'home workout for women'). Blank = normal daily run"
+        required: false
+        default: ""
       dry_run:
         description: "Dry run (read the sheet, write nothing)"
         type: boolean
@@ -25,6 +30,8 @@ jobs:
   run:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    outputs:
+      changed: ${{ steps.pipeline.outputs.changed }}
     steps:
       - uses: actions/checkout@v4
 
@@ -37,18 +44,37 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run tests
+        if: github.event.schedule != '*/30 * * * *'
         run: python -m pytest
 
       - name: Run pipeline
+        id: pipeline
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           SHEET_ID: ${{ secrets.SHEET_ID }}
           # Optional; without it the service account above calls the YouTube Data API.
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+          # Optional; used only to find creators' Instagram profiles via search results.
+          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+          SERPAPI_KEY: ${{ secrets.SERPAPI_KEY }}
+          QUERY: ${{ inputs.query }}
           DRY_RUN: ${{ inputs.dry_run }}
           MAX_QUERIES: ${{ inputs.max_queries }}
+          SCHEDULE: ${{ github.event.schedule }}
         run: |
-          args=""
-          if [ "$DRY_RUN" = "true" ]; then args="$args --dry-run"; fi
-          if [ -n "$MAX_QUERIES" ]; then args="$args --max-queries $MAX_QUERIES"; fi
-          python -m pipeline.main $args
+          args=()
+          if [ "$SCHEDULE" = "*/30 * * * *" ]; then args+=(--searches-only); fi
+          if [ -n "$QUERY" ]; then args+=(--query "$QUERY"); fi
+          if [ "$DRY_RUN" = "true" ]; then args+=(--dry-run); fi
+          if [ -n "$MAX_QUERIES" ]; then args+=(--max-queries "$MAX_QUERIES"); fi
+          python -m pipeline.main "${args[@]}"
+
+  deploy:
+    needs: run
+    if: needs.run.outputs.changed == 'true' && vars.PAGES_ENABLED == 'true'
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    uses: ./.github/workflows/pages.yml
+    secrets: inherit

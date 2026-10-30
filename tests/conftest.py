@@ -68,11 +68,25 @@ class FakeWorksheet:
         return [list(r) for r in self.rows]
 
     def update(self, values=None, range_name=None, **kwargs):
-        assert range_name == "A1"
-        if self.rows:
-            self.rows[0] = list(values[0])
-        else:
-            self.rows.append(list(values[0]))
+        """Supports header writes: 'A1' (whole row) or e.g. 'X1' (cells from column X)."""
+        assert range_name.endswith("1") and range_name[:-1].isalpha()
+        col = 0
+        for ch in range_name[:-1]:
+            col = col * 26 + (ord(ch.upper()) - 64)
+        if not self.rows:
+            self.rows.append([])
+        row = self.rows[0]
+        row.extend([""] * max(0, col - 1 - len(row)))
+        self.rows[0] = row[:col - 1] + list(values[0])
+
+    def batch_update(self, data, value_input_option=None, **kwargs):
+        """Supports single-row ranges like 'A5:H5'."""
+        self.batch_calls = getattr(self, "batch_calls", []) + [(data, value_input_option)]
+        for item in data:
+            row = int("".join(ch for ch in item["range"].split(":")[0] if ch.isdigit()))
+            while len(self.rows) < row:
+                self.rows.append([])
+            self.rows[row - 1] = list(item["values"][0])
 
     def append_rows(self, rows, value_input_option=None, **kwargs):
         self.append_calls.append(([list(r) for r in rows], value_input_option))

@@ -52,7 +52,8 @@ def test_append_leads_is_one_batched_call_in_header_order():
     assert len(leads_ws.append_calls) == 1
     rows, mode = leads_ws.append_calls[0]
     assert mode == "RAW"  # descriptions starting with "=" must not become formulas
-    assert rows[0] == ["h0", "h0@x.in", 0, "new", ""]
+    assert rows[0][:5] == ["h0", "h0@x.in", 0, "new", ""]  # owner's columns keep their order
+    assert leads_ws.rows[0][:5] == headers  # missing columns were appended after them
     assert len(rows) == 5
 
 
@@ -85,3 +86,16 @@ def test_bad_service_account_json():
         _open_spreadsheet("{not json", "id")
     with pytest.raises(SheetsUnavailable, match="service-account key"):
         _open_spreadsheet('{"type": "x"}', "id")
+
+
+def test_bootstrap_adds_new_columns_to_existing_tabs():
+    old_headers = [h for h in TAB_HEADERS["Leads"] if not h.startswith("instagram") and h != "search_query"]
+    leads = FakeWorksheet("Leads", [old_headers, ["UCold"] + [""] * (len(old_headers) - 1)])
+    store = SheetStore(FakeSpreadsheet([leads]))
+    actions = store.bootstrap()
+    assert any(a.startswith("add columns instagram, instagram_url, instagram_followers, search_query") for a in actions)
+    assert leads.rows[0] == old_headers + ["instagram", "instagram_url", "instagram_followers", "search_query"]
+    assert leads.rows[1][0] == "UCold"  # data untouched
+    store.append_leads([Lead(channel_id="UCnew", handle="", channel_url="u", instagram="riya.lifts")])
+    row = dict(zip(leads.rows[0], leads.rows[2]))
+    assert row["channel_id"] == "UCnew" and row["instagram"] == "riya.lifts"

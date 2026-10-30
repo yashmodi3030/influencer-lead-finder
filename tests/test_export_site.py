@@ -33,8 +33,13 @@ def test_fresh_salt_and_iv_each_time():
 def test_build_payload_reads_without_modifying_sheet():
     leads = FakeWorksheet("Leads", [TAB_HEADERS["Leads"], ["UCriya"] + [""] * 22, [""] * 23])
     runs = FakeWorksheet("RunLog", [TAB_HEADERS["RunLog"], ["r1"] + [""] * 9, ["r2"] + [""] * 9])
-    book = FakeSpreadsheet([leads, runs])
-    payload = build_payload(SheetStore(book), now=datetime(2026, 10, 30, tzinfo=timezone.utc))
+    searches = FakeWorksheet("Searches", [TAB_HEADERS["Searches"], ["q1"] + [""] * 7, ["q2", "", "done"] + [""] * 5])
+    book = FakeSpreadsheet([leads, runs, searches])
+    payload = build_payload(SheetStore(book), now=datetime(2026, 10, 30, tzinfo=timezone.utc),
+                            sheet_id="SID", repo="owner/repo")
+    assert [s["query"] for s in payload["searches"]] == ["q2", "q1"]  # newest first
+    assert payload["sheet_url"] == "https://docs.google.com/spreadsheets/d/SID/edit"
+    assert payload["repo"] == "owner/repo" and payload["dispatch_token"] == ""
     assert [l["channel_id"] for l in payload["leads"]] == ["UCriya"]
     assert payload["last_run"]["run_id"] == "r2"
     assert payload["generated_at"] == "2026-10-30T00:00:00+00:00"

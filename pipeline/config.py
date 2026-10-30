@@ -15,6 +15,15 @@ YOUTUBE_SCOPE = "https://www.googleapis.com/auth/youtube.readonly"
 YOUTUBE_DAILY_UNITS = 10_000  # default free quota per Google Cloud project
 YOUTUBE_UNITS_RESERVE = 300  # stop spending before the quota is fully used
 
+# Web search (optional): used only to find a creator's Instagram profile and read its
+# public bio from the search snippet. instagram.com itself is never fetched.
+TAVILY_SEARCH_URL = "https://api.tavily.com/search"
+TAVILY_USAGE_URL = "https://api.tavily.com/usage"
+SERPAPI_SEARCH_URL = "https://serpapi.com/search.json"
+SERPAPI_ACCOUNT_URL = "https://serpapi.com/account.json"
+WEB_SEARCH_RESULTS = 10
+LOW_QUOTA_THRESHOLD = 50  # warn when fewer web searches than this remain
+
 USER_AGENT = (
     "InfluencerLeadFinder/1.0 (polite bot; reads only publicly published "
     "business contact pages; respects robots.txt)"
@@ -45,6 +54,7 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "search_window_days": "90",
     "queries_per_run": "10",
     "max_new_leads_per_run": "50",
+    "instagram_lookups_per_run": "15",
     "active": "TRUE",
 }
 
@@ -60,6 +70,9 @@ class Config:
     sheet_id: str = ""
     # Optional: a YouTube Data API key. Without it the service account is used.
     youtube_api_key: str = ""
+    # Optional: web search, used to find Instagram profiles of creators.
+    tavily_api_key: str = ""
+    serpapi_key: str = ""
 
     def missing(self) -> list[str]:
         values = {
@@ -89,6 +102,8 @@ def load_config(env: Mapping[str, str] | None = None, use_dotenv: bool = True) -
         google_service_account_json=get("GOOGLE_SERVICE_ACCOUNT_JSON"),
         sheet_id=get("SHEET_ID"),
         youtube_api_key=get("YOUTUBE_API_KEY"),
+        tavily_api_key=get("TAVILY_API_KEY"),
+        serpapi_key=get("SERPAPI_KEY"),
     )
 
 
@@ -108,6 +123,7 @@ class RunSettings:
     search_window_days: int = 90
     queries_per_run: int = 10
     max_new_leads_per_run: int = 50
+    instagram_lookups_per_run: int = 15
     active: bool = True
 
 
@@ -147,6 +163,7 @@ def parse_settings(raw: Mapping[str, str]) -> tuple[RunSettings, list[str]]:
         search_window_days=max(1, as_int("search_window_days")),
         queries_per_run=as_int("queries_per_run"),
         max_new_leads_per_run=as_int("max_new_leads_per_run"),
+        instagram_lookups_per_run=as_int("instagram_lookups_per_run"),
         active=merged["active"].strip().upper() == "TRUE",
     )
     if settings.min_subscribers > settings.max_subscribers:

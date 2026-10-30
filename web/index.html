@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta http-equiv="Content-Security-Policy"
-        content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; object-src 'none'">
+        content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self' https://api.github.com; img-src 'self' data:; base-uri 'none'; form-action 'none'; object-src 'none'">
   <meta name="referrer" content="no-referrer">
   <meta name="robots" content="noindex, nofollow">
   <title>Influencer Lead Finder</title>
@@ -51,10 +51,27 @@
         <article class="stat"><h2>Last run</h2><p id="stat-run">–</p><small id="stat-run-detail" class="muted"></small></article>
       </section>
 
+      <section class="panel" aria-labelledby="ns-title">
+        <h2 id="ns-title" class="panel-title">New search</h2>
+        <form id="ns-form" class="filters" novalidate>
+          <label class="grow">What kind of creators?
+            <input id="ns-query" type="text" maxlength="120" placeholder="e.g. home workout for women, vegan recipes, budget travel" autocomplete="off">
+          </label>
+          <div class="filter-actions">
+            <button id="ns-btn" class="btn btn-primary" type="submit">Find creators</button>
+          </div>
+        </form>
+        <p id="ns-message" class="muted hint" role="status"></p>
+        <div id="ns-recent" class="recent" hidden>
+          <h3 class="recent-title">Recent searches</h3>
+          <ul id="ns-list" class="recent-list"></ul>
+        </div>
+      </section>
+
       <section class="panel" aria-label="Filters">
         <div class="filters">
           <label class="grow">Search
-            <input id="f-search" type="search" placeholder="Channel, description, email…" autocomplete="off">
+            <input id="f-search" type="search" placeholder="Channel, description, email, Instagram…" autocomplete="off">
           </label>
           <label>Niche <select id="f-niche"><option value="">All</option></select></label>
           <label>Status <select id="f-status"><option value="">All</option></select></label>
@@ -62,6 +79,7 @@
           <label>Subscribers max <input id="f-fmax" type="number" min="0" inputmode="numeric"></label>
           <label class="check"><input id="f-email" type="checkbox"> Has email</label>
           <label class="check"><input id="f-phone" type="checkbox"> Has phone</label>
+          <label class="check"><input id="f-ig" type="checkbox"> Has Instagram</label>
           <div class="filter-actions">
             <button id="clear-btn" class="btn" type="button">Clear</button>
             <button id="export-btn" class="btn btn-primary" type="button">Export CSV</button>

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 import uuid
 from dataclasses import asdict
@@ -14,10 +15,12 @@ from . import config
 from .config import RunSettings, load_config, parse_settings
 from .contacts import NON_CONTACT_LINK_DOMAINS, extract_emails, extract_phones_near_keywords, find_links
 from .fetcher import PoliteFetcher, is_blocked
+from .instagram_finder import InstagramFinder
 from .logging_setup import setup_logging
 from .metrics import VideoStats, video_stats
-from .models import Candidate, Lead, QueryLogEntry, Rejection, RunStats
-from .queries import build_queries, select_queries
+from .models import Candidate, Lead, QueryLogEntry, Rejection, RunStats, SearchRequest
+from .queries import PlannedQuery, build_queries, select_queries
+from .search import SearchManager, SerpApiClient, TavilyClient
 from .sheets import SheetStore, SheetsUnavailable
 from .validate import VALID, EmailValidator
 from .youtube import YouTubeClient, YouTubeError, YouTubeFatal, channel_url, video_url
@@ -93,7 +96,8 @@ def collect_candidates(results_by_query) -> dict[str, Candidate]:
             cid = result["channel_id"]
             if cid not in candidates:
                 candidates[cid] = Candidate(channel_id=cid, niche=planned.niche,
-                                            found_via=video_url(result["video_id"]))
+                                            found_via=video_url(result["video_id"]),
+                                            search_query=planned.query)
     return candidates
 
 
@@ -118,6 +122,28 @@ def own_links(description: str) -> list[str]:
     return out
 
 
+def phone_region(channel: dict) -> str:
+    """Numbers without a +country prefix are read in the channel's country."""
+    return (channel.get("country") or config.DEFAULT_PHONE_REGION).upper()
+
+
+def merge_instagram(contacts: dict[str, str], ig, validator) -> dict[str, str]:
+    """Fill a missing email/phone from the Instagram bio (as shown in search results)."""
+    source = "instagram bio (search snippet)"
+    used = False
+    if not contacts["email"] and ig.emails:
+        statuses = [(e, validator.status(e) if validator else "") for e in ig.emails[:MAX_EMAILS_TO_VALIDATE]]
+        contacts["email"], contacts["email_status"] = next((s for s in statuses if s[1] == VALID), statuses[0])
+        used = True
+    if not contacts["phone"] and ig.phones:
+        contacts["phone"] = ig.phones[0]
+        used = True
+    if used:
+        contacts["contact_source"] = ", ".join(x for x in (contacts["contact_source"], source) if x)
+        contacts["source_url"] = " | ".join(x for x in (contacts["source_url"], ig.url) if x)
+    return contacts
+
+
 def find_contacts(channel: dict, videos: list[dict], fetcher, validator) -> dict[str, str]:
     """Email/phone the creator published: channel description, video descriptions, own site."""
     ch_url = channel_url(channel["channel_id"], channel.get("handle", ""))
@@ -126,8 +152,7 @@ def find_contacts(channel: dict, videos: list[dict], fetcher, validator) -> dict
 
     emails: list[tuple[str, str, str]] = []  # (email, source, url)
     phones: list[tuple[str, str, str]] = []
-    # Numbers without a +country prefix are read in the channel's country.
-    region = (channel.get("country") or config.DEFAULT_PHONE_REGION).upper()
+    region = phone_region(channel)
 
     def add(bucket, value: str, source: str, url: str) -> None:
         if all(value != item[0] for item in bucket):
@@ -191,6 +216,10 @@ def parse_args(argv=None) -> argparse.Namespace:
                         help="read the sheet but write nothing; print what would be written")
     parser.add_argument("--max-queries", type=int, default=None,
                         help="override Settings queries_per_run for this run")
+    parser.add_argument("--query", action="append", default=[],
+                        help="search exactly this (repeatable); skips the daily rotation")
+    parser.add_argument("--searches-only", action="store_true",
+                        help="only run pending rows of the Searches tab; do nothing if there are none")
     parser.add_argument("--log-level", default=None, help="DEBUG, INFO, WARNING ...")
     return parser.parse_args(argv)
 
@@ -205,9 +234,16 @@ def _iso(dt: datetime) -> str:
 
 class Pipeline:
     def __init__(self, cfg: config.Config, store: SheetStore, youtube: YouTubeClient,
-                 fetcher=None, validator=None,
-                 dry_run: bool = False, max_queries: int | None = None, now=_now):
+                 fetcher=None, validator=None, web_search=None,
+                 dry_run: bool = False, max_queries: int | None = None,
+                 queries: list[str] | None = None, searches_only: bool = False, now=_now):
         self.cfg = cfg
+        self.web_search = web_search
+        self.custom_queries = [q.strip() for q in (queries or []) if q and q.strip()]
+        self.searches_only = searches_only
+        self.searches: list[SearchRequest] = []
+        self.idle = False  # True when there was nothing to do (searches-only mode)
+        self.instagram: InstagramFinder | None = None
         self.store = store
         self.youtube = youtube
         self.fetcher = fetcher
@@ -251,6 +287,8 @@ class Pipeline:
             log.error("Unexpected error: %s: %s", type(exc).__name__, exc)
         finally:
             self.stats.youtube_units_used = self.youtube.units_used
+            if self.instagram is not None:
+                self.stats.web_searches_used = self.instagram.lookups_used
         return self._finish()
 
     def _stop(self, exc: Exception) -> None:
@@ -264,13 +302,28 @@ class Pipeline:
         rejected = self.store.read_rejected_ids()
         last_used = self.store.read_query_log()
 
-        limit = settings.queries_per_run if self.max_queries is None else max(0, self.max_queries)
-        planned = build_queries(settings.niches)
-        queries = select_queries(planned, last_used, limit, today)
-        if not queries:
-            self.stats.warn(f"no fresh queries: all {len(planned)} were used in the last "
-                            f"{config.QUERY_REUSE_DAYS} days; add more niches")
-        log.info("Running %d of %d planned queries", len(queries), len(planned))
+        self.instagram = InstagramFinder(self.web_search, settings.instagram_lookups_per_run)
+
+        # Searches typed by the user come first: CLI/workflow input, then the Searches tab.
+        self.searches = [SearchRequest(query=q, requested_at=_iso(now)) for q in self.custom_queries]
+        self.searches += self.store.read_pending_searches()
+        queries = [PlannedQuery(query=s.query, niche=s.niche or s.query) for s in self.searches]
+        if self.searches_only and not queries:
+            log.info("No pending searches; nothing to do.")
+            self.idle = True
+            return
+        if not self.custom_queries and not self.searches_only:
+            limit = settings.queries_per_run if self.max_queries is None else max(0, self.max_queries)
+            planned = build_queries(settings.niches)
+            rotation = select_queries(planned, last_used, limit, today)
+            if not rotation:
+                self.stats.warn(f"no fresh queries: all {len(planned)} were used in the last "
+                                f"{config.QUERY_REUSE_DAYS} days; add more niches")
+            queries += rotation
+            log.info("Running %d requested + %d of %d planned queries",
+                     len(self.searches), len(rotation), len(planned))
+        else:
+            log.info("Running %d requested searches", len(queries))
 
         published_after = now - timedelta(days=settings.search_window_days)
         results_by_query = []
@@ -283,6 +336,7 @@ class Pipeline:
             except YouTubeError as exc:
                 self.stats.errors += 1
                 log.warning("Search failed: %s", exc)
+                self._search_note(planned_query.query, f"search failed: {exc}")
                 continue
             self.query_log.append(QueryLogEntry(query=planned_query.query, api="youtube",
                                                 date=today.isoformat(), results_count=len(results)))
@@ -290,6 +344,10 @@ class Pipeline:
 
         candidates = collect_candidates(results_by_query)
         self.stats.found = len(candidates)
+        for planned_query, results in results_by_query:
+            for s in self.searches:
+                if s.query == planned_query.query:
+                    s.channels_found = len({r["channel_id"] for r in results})
         fresh = [c for c in candidates.values() if skip_reason(c.channel_id, lead_statuses, rejected) is None]
         log.info("Found %d channels, %d new", len(candidates), len(fresh))
         if not fresh:
@@ -330,6 +388,23 @@ class Pipeline:
                 self.stats.errors += 1
                 log.warning("Channel %s failed: %s: %s", channel["channel_id"], type(exc).__name__, exc)
 
+    def _search_note(self, query: str, note: str) -> None:
+        for s in self.searches:
+            if s.query == query:
+                s.note = note
+
+    def _close_searches(self) -> None:
+        """Mark every requested search done (or error) with its results."""
+        done_at = _iso(self.now())
+        stopped = next((w for w in self.stats.warnings if w.startswith("YouTube stop")), "")
+        for s in self.searches:
+            s.leads_added = sum(1 for lead in self.leads if lead.search_query == s.query)
+            s.processed_at = done_at
+            ran = any(q.query == s.query for q in self.query_log)
+            s.status = "done" if ran else "error"
+            if not ran and not s.note:
+                s.note = stopped or "not run"
+
     def _reject(self, channel: dict, reason: str, today) -> None:
         self.rejections.append(Rejection(channel_id=channel["channel_id"], name=channel.get("title", ""),
                                          reason=reason, date=today.isoformat()))
@@ -347,6 +422,11 @@ class Pipeline:
             return
 
         contacts = find_contacts(channel, videos, self.fetcher, self.validator)
+        texts = [(channel.get("description", ""), "channel description")]
+        texts += [(v.get("description", ""), "video description") for v in videos]
+        ig = self.instagram.find(channel, texts, need_contacts=not (contacts["email"] and contacts["phone"]),
+                                 region=phone_region(channel))
+        contacts = merge_instagram(contacts, ig, self.validator)
         lead = Lead(
             channel_id=channel["channel_id"],
             handle=channel.get("handle", ""),
@@ -362,6 +442,10 @@ class Pipeline:
             country=channel.get("country", ""),
             niche=cand.niche,
             description=channel.get("description", "")[:1000],
+            instagram=ig.handle,
+            instagram_url=ig.url,
+            instagram_followers=ig.followers if ig.followers is not None else "",
+            search_query=cand.search_query,
             date_found=today.isoformat(),
             status="new",
             **contacts,
@@ -369,18 +453,28 @@ class Pipeline:
         self.leads.append(lead)
         self.stats.accepted += 1
         # Logs are public on a public repo: never print the contact details themselves.
-        log.info("Accepted %s (%d subs, median %d views, email=%s, phone=%s)", lead.name,
-                 lead.subscribers, lead.median_views, mask_email(lead.email), mask_phone(lead.phone))
+        log.info("Accepted %s (%d subs, median %d views, instagram=%s, email=%s, phone=%s)", lead.name,
+                 lead.subscribers, lead.median_views, "yes" if lead.instagram else "-",
+                 mask_email(lead.email), mask_phone(lead.phone))
+
+    @property
+    def changed(self) -> bool:
+        """Did this run write anything the website should show?"""
+        return not self.idle and not self.dry_run
 
     def _finish(self) -> int:
         self.stats.finished_at = _iso(self.now())
+        self._close_searches()
         if self.dry_run:
             self._print_dry_run()
+            return EXIT_OK
+        if self.idle:
             return EXIT_OK
         try:
             self.store.append_leads(self.leads)
             self.store.append_rejections(self.rejections)
             self.store.append_query_log(self.query_log)
+            self.store.save_searches(self.searches)
             self.store.append_run_log(self.stats)
         except Exception as exc:
             log.error("Google Sheets unreachable while writing results: %s", exc)
@@ -400,17 +494,20 @@ class Pipeline:
             d["email"], d["phone"] = mask_email(lead.email), mask_phone(lead.phone)
             print("  " + ", ".join(f"{k}={d[k]!r}" for k in
                                    ("name", "subscribers", "median_views", "engagement_rate",
-                                    "email", "phone", "contact_source")))
+                                    "instagram", "email", "phone", "contact_source")))
         print(f"Rejected to append ({len(self.rejections)}):")
         for r in self.rejections:
             print(f"  {r.name} ({r.channel_id}): {r.reason}")
+        print(f"Searches to mark ({len(self.searches)}):")
+        for r in self.searches:
+            print(f"  {r.query!r}: {r.status}, {r.channels_found} channels, {r.leads_added} leads {r.note}")
         print(f"QueryLog rows to append ({len(self.query_log)}):")
         for q in self.query_log:
             print(f"  [{q.api}] {q.query} -> {q.results_count} results")
         s = self.stats
         print(f"RunLog row: run_id={s.run_id} found={s.found} checked={s.checked} "
               f"accepted={s.accepted} rejected={s.rejected} errors={s.errors} "
-              f"youtube_units_used={s.youtube_units_used}")
+              f"youtube_units_used={s.youtube_units_used} web_searches_used={s.web_searches_used}")
         for w in s.warnings:
             print(f"  warning: {w}")
 
@@ -418,8 +515,15 @@ class Pipeline:
 def build_pipeline(cfg: config.Config, args: argparse.Namespace) -> Pipeline:
     store = SheetStore.connect(cfg.google_service_account_json, cfg.sheet_id)
     youtube = YouTubeClient(api_key=cfg.youtube_api_key, service_account_json=cfg.google_service_account_json)
+    providers = []
+    if cfg.tavily_api_key:
+        providers.append(TavilyClient(cfg.tavily_api_key))
+    if cfg.serpapi_key:
+        providers.append(SerpApiClient(cfg.serpapi_key))
+    web_search = SearchManager(providers) if providers else None
     return Pipeline(cfg, store, youtube, fetcher=PoliteFetcher(), validator=EmailValidator(),
-                    dry_run=args.dry_run, max_queries=args.max_queries)
+                    web_search=web_search, dry_run=args.dry_run, max_queries=args.max_queries,
+                    queries=args.query, searches_only=args.searches_only)
 
 
 def main(argv=None) -> int:
@@ -436,12 +540,24 @@ def main(argv=None) -> int:
         return EXIT_SHEETS_UNAVAILABLE
     if not cfg.youtube_api_key:
         log.info("YOUTUBE_API_KEY not set; using the service account for the YouTube Data API")
+    if not (cfg.tavily_api_key or cfg.serpapi_key):
+        log.info("No TAVILY_API_KEY / SERPAPI_KEY: Instagram handles only come from the creators' own descriptions")
     try:
         pipeline = build_pipeline(cfg, args)
     except SheetsUnavailable as exc:
         log.error("Google Sheets unreachable: %s", exc)
         return EXIT_SHEETS_UNAVAILABLE
-    return pipeline.run()
+    code = pipeline.run()
+    write_github_output(changed=code == EXIT_OK and pipeline.changed)
+    return code
+
+
+def write_github_output(changed: bool) -> None:
+    """In GitHub Actions, tell the workflow whether the website needs a redeploy."""
+    path = os.environ.get("GITHUB_OUTPUT")
+    if path:
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(f"changed={'true' if changed else 'false'}\n")
 
 
 if __name__ == "__main__":

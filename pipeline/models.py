@@ -12,6 +12,7 @@ class Candidate:
     channel_id: str
     niche: str
     found_via: str  # URL of the video that surfaced the channel
+    search_query: str = ""  # the query that found it
 
 
 @dataclass
@@ -31,11 +32,15 @@ class Lead:
     niche: str = ""
     description: str = ""
     website: str = ""
+    instagram: str = ""
+    instagram_url: str = ""
+    instagram_followers: int | str = ""
     email: str = ""
     email_status: str = ""
     phone: str = ""
     contact_source: str = ""
     source_url: str = ""
+    search_query: str = ""
     date_found: str = ""
     status: str = "new"
     notes: str = ""
@@ -71,11 +76,31 @@ class QueryLogEntry:
 
 
 @dataclass
+class SearchRequest:
+    """A search typed into the Searches tab (row is its 1-based sheet row, 0 = new row)."""
+
+    query: str
+    niche: str = ""
+    row: int = 0
+    requested_at: str = ""
+    status: str = "pending"
+    processed_at: str = ""
+    channels_found: int = 0
+    leads_added: int = 0
+    note: str = ""
+
+    def to_row(self, headers: list[str]) -> list:
+        data = asdict(self)
+        return [data.get(h.strip().lower(), "") for h in headers]
+
+
+@dataclass
 class RunStats:
     run_id: str
     started_at: str
     finished_at: str = ""
     youtube_units_used: int = 0
+    web_searches_used: int = 0
     found: int = 0
     checked: int = 0
     accepted: int = 0
