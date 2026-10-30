@@ -1,0 +1,60 @@
+name: Deploy website to GitHub Pages
+
+# Builds the dashboard: copies /web and adds data.enc.json, the leads encrypted with
+# DASHBOARD_USERNAME + DASHBOARD_PASSWORD (GitHub secrets). Runs after every successful
+# pipeline run, on changes to the site, or manually.
+#
+# GitHub Pages is free for PUBLIC repos; a PRIVATE repo needs GitHub Pro/Team. This job
+# only runs once the repository variable PAGES_ENABLED=true exists (SETUP.md step 5).
+
+on:
+  workflow_run:
+    workflows: ["Daily lead pipeline"]
+    types: [completed]
+  push:
+    branches: [main]
+    paths: ["web/**", "pipeline/export_site.py", ".github/workflows/pages.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    if: >-
+      vars.PAGES_ENABLED == 'true' &&
+      (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success')
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Build site with encrypted data
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          SHEET_ID: ${{ secrets.SHEET_ID }}
+          DASHBOARD_USERNAME: ${{ secrets.DASHBOARD_USERNAME }}
+          DASHBOARD_PASSWORD: ${{ secrets.DASHBOARD_PASSWORD }}
+        run: python -m pipeline.export_site --out _site
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,54 @@
+name: Daily lead pipeline
+
+on:
+  schedule:
+    - cron: "0 4 * * *" # 04:00 UTC = 09:30 IST
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (read the sheet, write nothing)"
+        type: boolean
+        default: false
+      max_queries:
+        description: "Override queries_per_run (blank = use Settings tab)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lead-pipeline
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests
+        run: python -m pytest
+
+      - name: Run pipeline
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          SHEET_ID: ${{ secrets.SHEET_ID }}
+          # Optional; without it the service account above calls the YouTube Data API.
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          MAX_QUERIES: ${{ inputs.max_queries }}
+        run: |
+          args=""
+          if [ "$DRY_RUN" = "true" ]; then args="$args --dry-run"; fi
+          if [ -n "$MAX_QUERIES" ]; then args="$args --max-queries $MAX_QUERIES"; fi
+          python -m pipeline.main $args

@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; object-src 'none'">
+  <meta name="referrer" content="no-referrer">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Influencer Lead Finder</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%234f46e5'/%3E%3Ccircle cx='16' cy='16' r='7' fill='none' stroke='white' stroke-width='3'/%3E%3Ccircle cx='23' cy='9' r='2' fill='white'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="styles.css">
+  <script src="config.js"></script>
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <!-- Login card: the only thing visible before sign-in. Data is only fetched after submit. -->
+  <main id="login-view" class="login-view">
+    <form id="login-form" class="login-card" aria-labelledby="app-title" autocomplete="on" novalidate>
+      <div class="logo" aria-hidden="true"></div>
+      <h1 id="app-title" class="js-app-name">Influencer Lead Finder</h1>
+      <p class="muted">Sign in to view leads.</p>
+      <label class="field">Username
+        <input id="username" name="username" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" required>
+      </label>
+      <label class="field">Password
+        <input id="password" name="password" type="password" autocomplete="current-password" required>
+      </label>
+      <button id="signin-btn" class="btn btn-primary btn-block" type="submit">Sign in</button>
+      <p id="login-message" class="login-message" role="alert" hidden></p>
+    </form>
+    <button class="theme-toggle floating js-theme-toggle" type="button" aria-label="Toggle dark mode">◐</button>
+  </main>
+
+  <!-- Dashboard: hidden until the data has been decrypted. -->
+  <div id="app-view" class="app-view" hidden>
+    <header class="topbar">
+      <div class="brand"><span class="logo small" aria-hidden="true"></span><span class="js-app-name">Influencer Lead Finder</span></div>
+      <div class="topbar-actions">
+        <span id="data-age" class="user-email"></span>
+        <button class="theme-toggle js-theme-toggle" type="button" aria-label="Toggle dark mode">◐</button>
+        <button id="signout-btn" class="btn" type="button">Sign out</button>
+      </div>
+    </header>
+
+    <main class="content">
+      <section class="stats" aria-label="Summary">
+        <article class="stat"><h2>Total leads</h2><p id="stat-total">–</p></article>
+        <article class="stat"><h2>New in last 7 days</h2><p id="stat-week">–</p></article>
+        <article class="stat"><h2>Valid email</h2><p id="stat-email">–</p></article>
+        <article class="stat"><h2>Last run</h2><p id="stat-run">–</p><small id="stat-run-detail" class="muted"></small></article>
+      </section>
+
+      <section class="panel" aria-label="Filters">
+        <div class="filters">
+          <label class="grow">Search
+            <input id="f-search" type="search" placeholder="Channel, description, email…" autocomplete="off">
+          </label>
+          <label>Niche <select id="f-niche"><option value="">All</option></select></label>
+          <label>Status <select id="f-status"><option value="">All</option></select></label>
+          <label>Subscribers min <input id="f-fmin" type="number" min="0" inputmode="numeric"></label>
+          <label>Subscribers max <input id="f-fmax" type="number" min="0" inputmode="numeric"></label>
+          <label class="check"><input id="f-email" type="checkbox"> Has email</label>
+          <label class="check"><input id="f-phone" type="checkbox"> Has phone</label>
+          <div class="filter-actions">
+            <button id="clear-btn" class="btn" type="button">Clear</button>
+            <button id="export-btn" class="btn btn-primary" type="button">Export CSV</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="table-meta">
+          <span id="result-count" class="muted"></span>
+          <div class="pager">
+            <button id="prev-btn" class="btn" type="button">‹ Prev</button>
+            <span id="page-info" class="muted"></span>
+            <button id="next-btn" class="btn" type="button">Next ›</button>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table id="leads-table">
+            <thead><tr id="thead-row"></tr></thead>
+            <tbody id="leads-body"></tbody>
+          </table>
+        </div>
+        <p id="empty-state" class="empty" hidden>No leads match these filters.</p>
+        <p class="muted hint">Status and notes are edited in the Google Sheet; changes appear here after the next deploy.</p>
+      </section>
+    </main>
+  </div>
+
+  <div id="toast-area" class="toast-area" aria-live="polite"></div>
+  <noscript><p class="noscript">This dashboard needs JavaScript.</p></noscript>
+</body>
+</html>
